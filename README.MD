@@ -1,12 +1,8 @@
 # DeepSeek2API
 
-[![](https://img.shields.io/github/license/iidamie/deepseek2api.svg)](LICENSE)
-![](https://img.shields.io/github/stars/iidamie/deepseek2api.svg)
-![](https://img.shields.io/github/forks/iidamie/deepseek2api.svg)
+支持高速流式输出、支持多轮对话、支持深度思考、支持联网搜索、支持工具调用（Function Calling），多路账号支持。
 
-支持高速流式输出、支持多轮对话、支持R1深度思考，多路账号支持，支持对话结束后自动删除 DeepSeek 会话，支持 工具函数调用。
-
-与ChatGPT接口完全兼容。
+与 OpenAI / Claude 接口完全兼容。
 
 ## 目录
 
@@ -20,6 +16,8 @@
 * [接口列表](#接口列表)
   * [模型列表](#模型列表)
   * [对话补全](#对话补全)
+  * [工具调用](#工具调用)
+  * [Claude API](#claude-api)
 * [注意事项](#注意事项)
   * [Nginx反代优化](#Nginx反代优化)
   * [Token统计](#Token统计)
@@ -31,12 +29,6 @@
 **逆向API是不稳定的，建议前往DeepSeek官方 https://platform.deepseek.com/ 付费使用API，避免封禁的风险。**
 
 **本组织和个人不接受任何资金捐助和交易，此项目是纯粹研究交流学习性质！**
-
-**仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！**
-
-**仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！**
-
-**仅限自用，禁止对外提供服务或商用，避免对官方造成服务压力，否则风险自担！**
 
 ## 接入准备
 
@@ -244,6 +236,16 @@ nohup uvicorn app:app --host 0.0.0.0 --port 5001 > uvicorn.log 2>&1 &
 }
 ```
 
+**支持的模型列表：**
+
+| 模型 ID | 说明 |
+|---------|------|
+| `deepseek-chat` / `deepseek-v？` | 标准对话模型 |
+| `deepseek-reasoner` / `deepseek-v?` | 思考模型 |
+| `deepseek-chat-search` / `deepseek-v?-search` | 标准模型 + 联网搜索 |
+| `deepseek-reasoner-search` / `deepseek-v?-search` | 深度思考 + 联网搜索 |
+```
+
 ### 对话补全
 
 对话补全接口，与openai的 [chat-completions-api](https://platform.openai.com/docs/guides/text-generation/chat-completions-api) 兼容。
@@ -260,10 +262,10 @@ Authorization: Bearer [userToken value or keys]
 ```json
 {
     // model名称
-    // 默认：deepseek-chat 或 deepseek-v3
-    // 深度思考：deepseek-reasoner 或 deepseek-r1
-    // 联网搜索：deepseek-chat-search 或 deepseek-v3-search
-    // 联网搜索 + 深度思考：deepseek-reasoner-search 或 deepseek-r1-search
+    // 默认：deepseek-chat
+    // 深度思考：deepseek-reasoner
+    // 联网搜索：deepseek-chat-search
+    // 联网搜索 + 思考：deepseek-reasoner-search
     "model": "deepseek-chat",
     // 多轮对话基于消息合并实现，某些场景可能导致能力下降且受单轮最大token数限制
     "messages": [
@@ -331,9 +333,52 @@ keepalive_timeout 120;
 "usage": {
   "completion_tokens": 37,
   "prompt_tokens": 1,
-  "total_tokens": 38
+  "total_tokens": 38,
+  "completion_tokens_details": {
+    "reasoning_tokens": 28
+  }
 }
 ```
+
+### 工具调用
+
+支持 OpenAI 格式的 Function Calling / Tools，模型会在需要时自动调用工具。
+
+请求示例：
+```json
+{
+    "model": "deepseek-reasoner",
+    "messages": [{"role": "user", "content": "北京天气如何？"}],
+    "tools": [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "获取指定城市的天气信息",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string", "description": "城市名称"}
+                    },
+                    "required": ["city"]
+                }
+            }
+        }
+    ]
+}
+```
+
+工具调用结果会以 `tool_calls` 形式返回，后续对话需要传递 `tool` 角色的消息来返回工具执行结果。
+
+### Claude API
+
+除 OpenAI 兼容接口外，还提供 Claude API 兼容接口：
+
+- **GET** `/anthropic/v1/models` - 获取模型列表
+- **POST** `/anthropic/v1/messages` - 对话补全
+- **POST** `/anthropic/v1/messages/count_tokens` - Token 计数
+
+支持 Claude 格式的 `tools`、`thinking` 等功能。
 
 ## Star History
 
@@ -341,4 +386,4 @@ keepalive_timeout 120;
 
 ## 鸣谢
 
-本项目部分代码参考了 [LLM-Red-Team/deepseek-free-api](https://github.com/LLM-Red-Team/deepseek-free-api)，在此表示感谢
+本项目部分代码参考了 [deepseek2api](https://github.com/iidamie/deepseek2api)，在此表示感谢
