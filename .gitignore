@@ -1,0 +1,63 @@
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 配置文件（包含敏感信息）
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# 测试相关
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 测试输出文件（临时生成的txt文件）
+tests/*.txt
+tests/raw_events_output.txt
+tests/search_interleaved_output.txt
+tests/stream_disclaimer_output.txt
+tests/stream_output.txt
+stream_output.txt
+stream_disclaimer_output.txt
+test_capture_all_events.py
+test_search_raw.py
+
+# 压缩包
+*.7z
+*.zip
+*.tar.gz
+*.rar
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+logs/
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
