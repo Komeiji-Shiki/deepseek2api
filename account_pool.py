@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import asyncio
-import random
-from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Deque, Iterable
+from dataclasses import dataclass
+from typing import Any, Iterable
 
 
 def get_account_identifier(account: dict[str, Any]) -> str:
@@ -14,88 +11,48 @@ def get_account_identifier(account: dict[str, Any]) -> str:
 
 @dataclass(slots=True)
 class AccountLease:
-    """账号租约，确保同一个租约只会被释放一次。"""
+    """账号租约（轮询模式下 release 为空操作）。"""
 
-    pool: "AccountPool"
     account_id: str
     account: dict[str, Any]
-    _released: bool = field(default=False, init=False, repr=False)
 
     @property
     def identifier(self) -> str:
         return self.account_id
 
-    @property
-    def released(self) -> bool:
-        return self._released
-
     async def release(self) -> None:
-        if self._released:
-            return
-        self._released = True
-        await self.pool.release(self.account_id)
+        pass
 
 
 class AccountPool:
-    """并发安全的账号池。"""
+    """简单轮询账号池，无并发控制。"""
 
     def __init__(self, accounts: Iterable[dict[str, Any]]):
-        self._accounts_by_id: dict[str, dict[str, Any]] = {}
-        account_ids: list[str] = []
-
+        self._accounts: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
         for account in accounts:
-            account_id = get_account_identifier(account)
-            if not account_id or account_id in self._accounts_by_id:
-                continue
-            self._accounts_by_id[account_id] = account
-            account_ids.append(account_id)
-
-        random.shuffle(account_ids)
-        self._available: Deque[str] = deque(account_ids)
-        self._in_use: set[str] = set()
-        self._lock = asyncio.Lock()
+            aid = get_account_identifier(account)
+            if aid and aid not in seen:
+                seen.add(aid)
+                self._accounts.append((aid, account))
+        self._index = 0
 
     def has_accounts(self) -> bool:
-        return bool(self._accounts_by_id)
+        return bool(self._accounts)
 
     def size(self) -> int:
-        return len(self._accounts_by_id)
+        return len(self._accounts)
 
     async def acquire(self, exclude_ids: set[str] | None = None) -> AccountLease | None:
+        if not self._accounts:
+            return None
         excluded = set(exclude_ids or ())
-        async with self._lock:
-            if not self._available:
-                return None
-
-            skipped: list[str] = []
-            selected_id: str | None = None
-            rounds = len(self._available)
-
-            for _ in range(rounds):
-                candidate = self._available.popleft()
-                if candidate in excluded:
-                    skipped.append(candidate)
-                    continue
-                if candidate in self._in_use:
-                    continue
-                selected_id = candidate
-                self._in_use.add(candidate)
-                break
-
-            self._available.extend(skipped)
-
-            if selected_id is None:
-                return None
-
-            return AccountLease(
-                pool=self,
-                account_id=selected_id,
-                account=self._accounts_by_id[selected_id],
-            )
-
-    async def release(self, account_id: str) -> None:
-        async with self._lock:
-            if account_id not in self._in_use:
-                return
-            self._in_use.remove(account_id)
-            self._available.append(account_id)
+        n = len(self._accounts)
+        start = self._index % n
+        for offset in range(n):
+            idx = (start + offset) % n
+            aid, account = self._accounts[idx]
+            if aid not in excluded:
+                self._index = idx + 1
+                return AccountLease(account_id=aid, account=account)
+        return None
