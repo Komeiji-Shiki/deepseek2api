@@ -1136,10 +1136,10 @@ def _emit_fragment_events(
             site_name = result.get("site_name", "")
             if title:
                 source = site_name or "网页"
-                events.append({"type": "thinking", "content": f"{prefix}「浏览: [{source}] {title[:40]}{'...' if len(title) > 40 else ''}」\n"})
+                events.append({"type": "thinking", "content": f"{prefix}「浏览: [{source}] {title}」\n"})
                 is_first_tool_call = False
             elif url:
-                events.append({"type": "thinking", "content": f"{prefix}「打开: {url[:60]}{'...' if len(url) > 60 else ''}」\n"})
+                events.append({"type": "thinking", "content": f"{prefix}「打开: {url}」\n"})
                 is_first_tool_call = False
         elif isinstance(ref, dict):
             events.append({"type": "thinking", "content": f"{prefix}「继续浏览页面...」\n"})
