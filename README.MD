@@ -1,6 +1,6 @@
 # DeepSeek2API
 
-支持高速流式输出、支持多轮对话、支持深度思考、支持联网搜索、支持专家模式、支持工具调用（Function Calling），多路账号支持。
+支持高速流式输出、支持多轮对话、支持深度思考、支持联网搜索、支持专家模式、支持视觉识别（Vision）、支持工具调用（Function Calling），多路账号支持。
 
 与 OpenAI / Claude 接口完全兼容。
 
@@ -49,6 +49,8 @@
 在 `deepseek` 目录下，创建 config.json文件
 ```json
 {
+  "auto_delete_sessions": true,
+  "inject_integrity_guard": true,
   "keys": [
     "key1",
     "key2"
@@ -78,6 +80,8 @@
 }
 ```
  * keys - 你的 API 鉴权密钥
+ * auto_delete_sessions - 对话结束后是否自动删除 DeepSeek 会话（true/false，默认 true，调试时可设为 false）
+ * inject_integrity_guard - 是否自动注入 Output Integrity Guard 系统提示（true/false，默认 true）
  * accounts - DeepSeek 账号列表，支持多个账号轮换，避免单账号受限
 
 拉取镜像并启动服务。
@@ -202,87 +206,50 @@ nohup uvicorn app:app --host 0.0.0.0 --port 5001 > uvicorn.log 2>&1 &
 响应数据:
 ```json
 {
+  "object": "list",
   "data": [
-    {
-      "created": 1677610602,
-      "id": "deepseek-default-chat",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-default-chat-search",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-default-reasoner",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-default-reasoner-search",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-expert-chat",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-expert-reasoner",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-expert-chat-search",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    },
-    {
-      "created": 1677610602,
-      "id": "deepseek-expert-reasoner-search",
-      "object": "model",
-      "owned_by": "deepseek",
-      "permission": []
-    }
+    {"id": "deepseek-chat",               "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-chat-search",        "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-reasoner",           "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-reasoner-search",    "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-expert-chat",        "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-expert-chat-search", "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-expert-reasoner",    "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-expert-reasoner-search", "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-vision-chat",        "object": "model", "created": 1677610602, "owned_by": "deepseek"},
+    {"id": "deepseek-vision-reasoner",    "object": "model", "created": 1677610602, "owned_by": "deepseek"}
   ],
-  "object": "list"
 }
 ```
 
 **支持的模型列表：**
 
-**默认模式：**
+**标准模式（default）：**
 
 | 模型 ID | 说明 |
 |---------|------|
-| `deepseek-default-chat` | 标准对话模型 |
-| `deepseek-default-chat-search` | 标准模型 + 联网搜索 |
-| `deepseek-default-reasoner` | 深度思考模型 |
-| `deepseek-default-reasoner-search` | 深度思考 + 联网搜索 |
+| `deepseek-chat` | 标准对话模型 |
+| `deepseek-chat-search` | 标准模型 + 联网搜索 |
+| `deepseek-reasoner` | 深度思考模型 |
+| `deepseek-reasoner-search` | 深度思考 + 联网搜索 |
 
 **专家模式：**
 
 | 模型 ID | 说明 |
 |---------|------|
-| `deepseek-expert-chat` | 专家模式对话 |
+| `deepseek-expert-chat` | 专家模式对话模型 |
 | `deepseek-expert-chat-search` | 专家模式 + 联网搜索 |
 | `deepseek-expert-reasoner` | 专家模式 + 深度思考 |
 | `deepseek-expert-reasoner-search` | 专家模式 + 深度思考 + 联网搜索 |
+
+**视觉模式（Vision）：**
+
+| 模型 ID | 说明 |
+|---------|------|
+| `deepseek-vision-chat` | 视觉对话模型（支持图片输入） |
+| `deepseek-vision-reasoner` | 视觉 + 深度思考 |
+
+> **注意：** 视觉模型仅通过 `vision` 通道工作，不支持联网搜索。
 ```
 
 ### 对话补全
@@ -382,6 +349,42 @@ keepalive_timeout 120;
   }
 }
 ```
+
+### Vision 视觉支持
+
+DeepSeek2API 支持视觉模型（`deepseek-vision-chat`、`deepseek-vision-reasoner`），自动识别并上传消息中的图片/文件。
+
+**支持的图片/文件输入格式：**
+
+| 格式 | 示例 |
+|------|------|
+| OpenAI `image_url` | `{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` |
+| 纯 base64 | `{"type": "image", "base64": "..."}` |
+| `file_data` 字段 | `{"type": "file", "file_data": "base64..."}` |
+| `data` 字段 | `{"type": "image", "data": "data:image/png;base64,..."}` |
+| `data:` URL | `{"data": "data:image/png;base64,..."}` |
+
+> 图片上传至 DeepSeek 后，模型以 `ref_file_ids` 方式引用，原始 base64 数据不会发送给模型。上传失败时接口会返回明确的错误信息。
+
+视觉模型请求示例：
+```json
+{
+    "model": "deepseek-vision-reasoner",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "这张图片里有什么？"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo..."}
+                }
+            ]
+        }
+    ]
+}
+```
+
 
 ### 工具调用
 

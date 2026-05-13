@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from curl_cffi import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -23,7 +24,7 @@ from fastapi.templating import Jinja2Templates
 from wasmtime import Linker, Module, Store
 
 from account_pool import AccountLease, AccountPool
-from file_upload import build_multipart_body, extract_file_id, preprocess_inline_files
+from file_upload import build_multipart_body, extract_file_id, preprocess_inline_files, InlineFileUploadError
 from file_upload import DEEPSEEK_UPLOAD_FILE_URL, DEEPSEEK_UPLOAD_TARGET_PATH
 from tool_calling import (
     XmlToolCallStreamParser,
@@ -54,6 +55,7 @@ DEEPSEEK_CREATE_SESSION_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat_session/crea
 DEEPSEEK_DELETE_SESSION_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat_session/delete"
 DEEPSEEK_CREATE_POW_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/create_pow_challenge"
 DEEPSEEK_COMPLETION_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/completion"
+DEEPSEEK_FETCH_FILES_URL = f"https://{DEEPSEEK_HOST}/api/v0/file/fetch_files"
 
 BASE_HEADERS = {
     "Host": DEEPSEEK_HOST,
@@ -67,122 +69,79 @@ BASE_HEADERS = {
     "accept-charset": "UTF-8",
 }
 
-OPENAI_MODELS = [
-    {
-        "id": "deepseek-chat",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-reasoner",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-chat-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-reasoner-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert-reasoner",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert-reasoner-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-default-chat",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-default-chat-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-default-reasoner",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-default-reasoner-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert-chat",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-expert-chat-search",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
+from dataclasses import dataclass
+import re
 
-    {
-        "id": "deepseek-vision-chat",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
-        "id": "deepseek-vision-reasoner",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
 
-]
+@dataclass(frozen=True, slots=True)
+class ModelTraits:
+    """模型特征（由名称解析得出，不再硬编码映射）。"""
+    thinking: bool
+    search: bool
+    model_type: str  # "default", "expert", "vision"
+
+
+_MODEL_FAMILIES: dict[str, dict[str, bool]] = {
+    "default": {"search_supported": True},
+    "expert":  {"search_supported": True},
+    "vision":  {"search_supported": False},  # vision 模型不支持联网
+}
+
+_MODEL_CAPABILITIES = ("chat", "reasoner")
+
+_MODEL_PATTERN = re.compile(
+    r"deepseek-"
+    r"(?:(?P<family>expert|vision|default)-)?"
+    r"(?P<capability>chat|reasoner)"
+    r"(?:-(?P<search>search))?$"
+)
+
+
+def infer_model_traits(model: str) -> ModelTraits:
+    """根据模型名称动态推断 think / search / model_type。"""
+    normalized = model.strip().lower()
+    match = _MODEL_PATTERN.match(normalized)
+    if not match:
+        raise HTTPException(status_code=503, detail=f"Model '{model}' is not available.")
+
+    family = match.group("family") or "default"
+    capability = match.group("capability")
+    search_flag = (match.group("search") == "search")
+
+    thinking = (capability == "reasoner")
+
+    if family == "vision":
+        search_flag = False
+
+    return ModelTraits(
+        thinking=thinking,
+        search=search_flag,
+        model_type=family,
+    )
+
+
+def _build_openai_models() -> list[dict[str, Any]]:
+    """动态生成 OPENAI_MODELS 列表，覆盖所有 supported family × capability × search 组合。"""
+    models: list[dict[str, Any]] = []
+    base = {
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    }
+    for family, props in _MODEL_FAMILIES.items():
+        for cap in _MODEL_CAPABILITIES:
+            if family == "default":
+                model_id = f"deepseek-{cap}"
+            else:
+                model_id = f"deepseek-{family}-{cap}"
+            models.append({"id": model_id, **base})
+            if props["search_supported"]:
+                models.append({"id": f"{model_id}-search", **base})
+    return models
+
+
+OPENAI_MODELS = _build_openai_models()
 
 CLAUDE_MODELS = [
     {
@@ -216,6 +175,8 @@ def load_config() -> dict[str, Any]:
 
 
 CONFIG: dict[str, Any] = load_config()
+AUTO_DELETE_SESSIONS: bool = CONFIG.get("auto_delete_sessions", True)
+INJECT_INTEGRITY_GUARD: bool = CONFIG.get("inject_integrity_guard", True)
 CONFIG_WRITE_LOCK = asyncio.Lock()
 ACCOUNT_POOL = AccountPool(CONFIG.get("accounts", []))
 templates = Jinja2Templates(directory="templates")
@@ -261,7 +222,7 @@ class CompletionContext:
     output_model: str
     thinking_enabled: bool
     search_enabled: bool
-    expert_enabled: bool
+    model_type: str
 
 
 class SyncResponseAsyncAdapter:
@@ -378,26 +339,6 @@ def build_usage(prompt: str, reasoning: str, content: str) -> dict[str, Any]:
     }
 
 
-def resolve_deepseek_model_features(model: str) -> tuple[bool, bool, bool]:
-    normalized = model.strip().lower()
-    if normalized in {"deepseek-v3", "deepseek-chat"}:
-        return False, False, False
-    if normalized in {"deepseek-r1", "deepseek-reasoner"}:
-        return True, False, False
-    if normalized in {"deepseek-v3-search", "deepseek-chat-search"}:
-        return False, True, False
-    if normalized in {"deepseek-r1-search", "deepseek-reasoner-search"}:
-        return True, True, False
-    if normalized in {"deepseek-expert"}:
-        return False, False, True
-    if normalized in {"deepseek-expert-reasoner"}:
-        return True, False, True
-    if normalized in {"deepseek-expert-search"}:
-        return False, True, True
-    if normalized in {"deepseek-expert-reasoner-search"}:
-        return True, True, True
-    raise HTTPException(status_code=503, detail=f"Model '{model}' is not available.")
-
 
 def map_claude_model_to_deepseek(model: str) -> str:
     mapping = CONFIG.get(
@@ -426,9 +367,10 @@ def messages_prepare(messages: list[dict[str, Any]], *, thinking_enabled: bool =
         return ""
 
     # 注入 Output Integrity Guard（仿 ds2api-main）
-    first_role = str(messages[0].get("role", "")).strip().lower()
-    if first_role != "system" or OUTPUT_INTEGRITY_GUARD.split(":")[0] not in str(messages[0].get("content", "")):
-        messages = [{"role": "system", "content": OUTPUT_INTEGRITY_GUARD}] + messages
+    if INJECT_INTEGRITY_GUARD:
+        first_role = str(messages[0].get("role", "")).strip().lower()
+        if first_role != "system" or OUTPUT_INTEGRITY_GUARD.split(":")[0] not in str(messages[0].get("content", "")):
+            messages = [{"role": "system", "content": OUTPUT_INTEGRITY_GUARD}] + messages
 
     processed: list[dict[str, str]] = []
     for message in messages:
@@ -453,7 +395,7 @@ def messages_prepare(messages: list[dict[str, Any]], *, thinking_enabled: bool =
         else:
             merged.append(message)
 
-    parts: list[str] = ["<|begin▁of▁sentence|>"]
+    parts: list[str] = ["<｜begin▁of▁sentence｜>"]
     last_role = ""
     for block in merged:
         role = block["role"].strip().lower()
@@ -461,14 +403,14 @@ def messages_prepare(messages: list[dict[str, Any]], *, thinking_enabled: bool =
         last_role = role
         if role == "system":
             if text.strip():
-                parts.append(f"<|System|>{text}<|end▁of▁instructions|>")
+                parts.append(f"<｜System｜>{text}<｜end▁of▁instructions｜>")
         elif role == "user":
-            parts.append(f"<|User|>{text}")
+            parts.append(f"<｜User｜>{text}")
         elif role == "assistant":
-            parts.append(f"<|Assistant|>{text}<|end▁of▁sentence|>")
+            parts.append(f"<｜Assistant｜>{text}<｜end▁of▁sentence｜>")
         elif role == "tool":
             if text.strip():
-                parts.append(f"<|Tool|>{text}<|end▁of▁toolresults|>")
+                parts.append(f"<｜Tool｜>{text}<｜end▁of▁toolresults｜>")
 
 
     final_prompt = "".join(parts)
@@ -616,6 +558,9 @@ def normalize_claude_messages(messages: list[dict[str, Any]]) -> list[dict[str, 
                         "arguments": block.get("input", {}) if isinstance(block.get("input", {}), dict) else {},
                     }
                 )
+            elif block_type in ("image", "image_url", "input_image", "file"):
+                # 多模态块：由 preprocess_inline_files 处理，跳过
+                continue
             else:
                 parts.append(normalize_text_content(block))
 
@@ -695,18 +640,39 @@ async def login_deepseek_via_account(request: Request, account: dict[str, Any]) 
     )
 
     if response.status_code != 200:
+        logger.error( ... )
+        raise HTTPException(...)
+
+    # DeepSeek 登录接口即使 HTTP 200 也可能返回 code != 0（例如需要验证码）
+    biz_code = data.get("code") if isinstance(data, dict) else None
+    if biz_code != 0:
         logger.error(
-            "[login_deepseek_via_account] 登录失败, status=%s, body=%s",
-            response.status_code,
+            "[login_deepseek_via_account] 登录失败 (code=%s, msg=%s), body=%s",
+            biz_code,
+            data.get("msg", ""),
             str(data)[:300],
         )
-        raise HTTPException(status_code=500, detail="Account login failed.")
+        raise HTTPException(status_code=500, detail=f"Account login failed: {data.get('msg', 'unknown')}")
 
-    biz_data = (
-        data.get("data", {})
-        .get("biz_data", {})
-    )
-    user_data = biz_data.get("user", {})
+    inner_data = data.get("data")
+    if not isinstance(inner_data, dict):
+        logger.error(
+            "[login_deepseek_via_account] 登录响应 data 字段无效: %s",
+            str(data)[:300],
+        )
+        raise HTTPException(status_code=500, detail="Account login failed: invalid response data")
+
+    biz_data = inner_data.get("biz_data")
+    if not isinstance(biz_data, dict):
+        logger.error(
+            "[login_deepseek_via_account] 登录响应 biz_data 字段无效: %s",
+            str(inner_data)[:300],
+        )
+        raise HTTPException(status_code=500, detail="Account login failed: missing biz_data")
+
+    user_data = biz_data.get("user")
+    if not isinstance(user_data, dict):
+        user_data = {}
     new_token = str(user_data.get("token", "")).strip()
     if not new_token:
         logger.error("[login_deepseek_via_account] 登录响应缺少 token: %s", data)
@@ -1079,6 +1045,74 @@ def _sync_completion_post(
     )
 
 
+def _is_ready_file_status(status: str) -> bool:
+    """检查上传文件状态是否为可用的完成状态。"""
+    s = status.strip().lower()
+    return s in ("processed", "ready", "done", "available", "success", "completed", "finished")
+
+
+def _wait_for_uploaded_file(
+    token: str,
+    base_headers: dict[str, str],
+    file_id: str,
+    *,
+    max_attempts: int = 60,
+    poll_interval: float = 1.0,
+) -> bool:
+    """轮询等待上传文件处理完成（参照 Go 原版 waitForUploadedFile）。"""
+    if not file_id or not token:
+        return False
+
+    auth_headers = {**base_headers, "authorization": f"Bearer {token}"}
+    fetch_url = DEEPSEEK_FETCH_FILES_URL + "?file_ids=" + quote(file_id, safe="")
+
+    for attempt in range(max_attempts):
+        try:
+            resp = requests.get(
+                fetch_url,
+                headers=auth_headers,
+                timeout=15,
+                impersonate="safari15_3",
+            )
+            data = resp.json()
+            resp.close()
+
+            code = data.get("code", -1)
+            if resp.status_code == 200 and code == 0:
+                # 递归搜索文件状态
+                def _find_status(obj: Any) -> str | None:
+                    if isinstance(obj, dict):
+                        sid = obj.get("id") or obj.get("file_id")
+                        if isinstance(sid, str) and sid.strip() == file_id:
+                            for k in ("status", "file_status"):
+                                v = obj.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    return v.strip()
+                        for v in obj.values():
+                            s = _find_status(v)
+                            if s:
+                                return s
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            s = _find_status(item)
+                            if s:
+                                return s
+                    return None
+
+                status = _find_status(data)
+                if status and _is_ready_file_status(status):
+                    logger.info("[upload_sync] 文件就绪, file_id=%s, status=%s", file_id, status)
+                    return True
+                logger.debug("[upload_sync] 文件等待中, file_id=%s, status=%s, attempt=%d", file_id, status or "unknown", attempt + 1)
+        except Exception as exc:
+            logger.debug("[upload_sync] 轮询文件状态异常: %s", exc)
+
+        if attempt < max_attempts - 1:
+            time.sleep(poll_interval)
+
+    logger.warning("[upload_sync] 文件超时未就绪, file_id=%s", file_id)
+    return False
+
 def _upload_file_to_deepseek_sync(
     data: bytes,
     filename: str,
@@ -1181,6 +1215,12 @@ def _upload_file_to_deepseek_sync(
     file_id = extract_file_id(resp_data)
     if file_id:
         logger.info("[upload_sync] 上传成功, file_id=%s, filename=%s", file_id, filename)
+        # 轮询等待文件处理完成（参照 Go 原版 waitForUploadedFile）
+        if not _wait_for_uploaded_file(token, base_headers, file_id):
+            logger.warning(
+                "[upload_sync] 文件未就绪但仍尝试使用, file_id=%s, filename=%s",
+                file_id, filename,
+            )
     return file_id
 
 
@@ -1338,13 +1378,19 @@ async def cleanup_completion(
             logger.warning("[cleanup_completion] 关闭上游响应异常: %s", exc)
 
     if completion is not None and completion.session_id:
-        try:
-            await delete_chat_session(request, auth_ctx, completion.session_id)
-        except Exception as exc:
-            logger.warning(
-                "[cleanup_completion] 删除会话异常(session=%s): %s",
+        if AUTO_DELETE_SESSIONS:
+            try:
+                await delete_chat_session(request, auth_ctx, completion.session_id)
+            except Exception as exc:
+                logger.warning(
+                    "[cleanup_completion] 删除会话异常(session=%s): %s",
+                    completion.session_id,
+                    exc,
+                )
+        else:
+            logger.info(
+                "[cleanup_completion] 跳过删除会话(session=%s, auto_delete_sessions=false)",
                 completion.session_id,
-                exc,
             )
         completion.session_id = ""
 
@@ -1360,7 +1406,15 @@ async def start_deepseek_completion(
     output_model: str,
     ref_file_ids: list[str] | None = None,
 ) -> CompletionContext:
-    thinking_enabled, search_enabled, expert_enabled = resolve_deepseek_model_features(deepseek_model)
+    traits = infer_model_traits(deepseek_model)
+    logger.info(
+        "[start_deepseek_completion] 模型=%s, traits=(thinking=%s, search=%s, model_type=%s)",
+        deepseek_model,
+        traits.thinking,
+        traits.search,
+        traits.model_type,
+    )
+    thinking_enabled, search_enabled = traits.thinking, traits.search
     final_prompt = messages_prepare(messages, thinking_enabled=thinking_enabled)
 
     session_id = await create_session(request, auth_ctx)
@@ -1402,7 +1456,7 @@ async def start_deepseek_completion(
     payload = {
         "chat_session_id": session_id,
         "parent_message_id": None,
-        "model_type": "expert" if expert_enabled else "default",
+        "model_type": traits.model_type,
         "prompt": final_prompt,
         "ref_file_ids": ref_file_ids or [],
         "thinking_enabled": thinking_enabled,
@@ -1421,7 +1475,7 @@ async def start_deepseek_completion(
         output_model=output_model,
         thinking_enabled=thinking_enabled,
         search_enabled=search_enabled,
-        expert_enabled=expert_enabled,
+        model_type=traits.model_type,
     )
 
 
@@ -1598,15 +1652,14 @@ async def chat_completions(request: Request):
             len(tools),
             [t["name"] for t in tools],
         )
-        normalized_messages = normalize_openai_messages(raw_messages)
-        normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
 
-        # Vision / 文件预处理：上传 inline image，收集 ref_file_ids
+        # Vision / 文件预处理：先上传 inline image，收集 ref_file_ids（必须在 normalize 之前）
         ref_file_ids: list[str] = []
+        working_messages = list(raw_messages)
         if raw_messages:
             _base_headers = get_auth_headers(auth_ctx) if auth_ctx else BASE_HEADERS
             _token = auth_ctx.deepseek_token if auth_ctx else ""
-            _model_type = "expert" if resolve_deepseek_model_features(model)[2] else "default"
+            _model_type = infer_model_traits(model).model_type
 
             def _sync_upload(data: bytes, filename: str, content_type: str) -> str | None:
                 return _upload_file_to_deepseek_sync(
@@ -1614,13 +1667,23 @@ async def chat_completions(request: Request):
                     model_type=_model_type,
                 )
 
-            # preprocess_inline_files 是同步的，在 asyncio.to_thread 中执行
-            normalized_messages, ref_file_ids = await asyncio.to_thread(
-                preprocess_inline_files,
-                normalized_messages,
-                _sync_upload,
-            )
-            logger.info("[chat_completions] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+            try:
+                working_messages, ref_file_ids = await asyncio.to_thread(
+                    preprocess_inline_files,
+                    working_messages,
+                    _sync_upload,
+                )
+                logger.info("[chat_completions] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+            except InlineFileUploadError as exc:
+                logger.error("[chat_completions] inline file 上传失败: %s", exc)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Inline file upload failed: {exc.message}",
+                ) from exc
+
+        # 预处理完成后再规范化消息
+        normalized_messages = normalize_openai_messages(working_messages)
+        normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
 
         completion = await start_deepseek_completion(
             request,
@@ -1919,17 +1982,13 @@ async def claude_messages(request: Request):
         tool_choice = req_data.get("tool_choice")
         system_prompt = normalize_text_content(req_data.get("system", ""))
 
-        normalized_messages = normalize_claude_messages(raw_messages)
-        if system_prompt:
-            normalized_messages = prepend_system_instruction(normalized_messages, system_prompt)
-        normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
-
-        # Vision / 文件预处理
+        # Vision / 文件预处理：先上传 inline image（必须在 normalize 之前）
         ref_file_ids: list[str] = []
+        working_messages = list(raw_messages)
         if raw_messages:
             _base_headers = get_auth_headers(auth_ctx) if auth_ctx else BASE_HEADERS
             _token = auth_ctx.deepseek_token if auth_ctx else ""
-            _model_type = "default"
+            _model_type = infer_model_traits(map_claude_model_to_deepseek(model)).model_type
 
             def _sync_upload(data: bytes, filename: str, content_type: str) -> str | None:
                 return _upload_file_to_deepseek_sync(
@@ -1937,12 +1996,25 @@ async def claude_messages(request: Request):
                     model_type=_model_type,
                 )
 
-            normalized_messages, ref_file_ids = await asyncio.to_thread(
-                preprocess_inline_files,
-                normalized_messages,
-                _sync_upload,
-            )
-            logger.info("[claude_messages] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+            try:
+                working_messages, ref_file_ids = await asyncio.to_thread(
+                    preprocess_inline_files,
+                    working_messages,
+                    _sync_upload,
+                )
+                logger.info("[claude_messages] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+            except InlineFileUploadError as exc:
+                logger.error("[claude_messages] inline file 上传失败: %s", exc)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Inline file upload failed: {exc.message}",
+                ) from exc
+
+        # 预处理完成后再规范化消息
+        normalized_messages = normalize_claude_messages(working_messages)
+        if system_prompt:
+            normalized_messages = prepend_system_instruction(normalized_messages, system_prompt)
+        normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
 
         completion = await start_deepseek_completion(
             request,

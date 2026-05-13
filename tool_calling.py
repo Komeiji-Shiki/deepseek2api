@@ -224,8 +224,11 @@ def normalize_text_content(content: Any) -> str:
         parts: list[str] = []
         for item in content:
             if isinstance(item, dict):
-                item_type = item.get("type")
-                if item_type == "text":
+                item_type = str(item.get("type", "")).lower()
+                if item_type in ("image_url", "input_image", "image", "file"):
+                    # 多模态块：由 preprocess_inline_files 处理，跳过
+                    continue
+                elif item_type == "text":
                     parts.append(str(item.get("text", "")))
                 elif item_type == "tool_result":
                     parts.append(str(item.get("content", "")))
@@ -251,6 +254,10 @@ def normalize_text_content(content: Any) -> str:
         return "\n".join(part for part in parts if part)
 
     if isinstance(content, dict):
+        item_type = str(content.get("type", "")).lower()
+        if item_type in ("image_url", "input_image", "image", "file"):
+            # 多模态块：跳过
+            return ""
         if "text" in content:
             return str(content.get("text", ""))
         if "content" in content:
