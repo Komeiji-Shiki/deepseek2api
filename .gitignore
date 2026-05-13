@@ -1,0 +1,8 @@
+*.bak
+config.json
+stream_output.txt
+app.7z
+.pytest_cache/
+__pycache__/
+*.pyc
+uvicorn.log
