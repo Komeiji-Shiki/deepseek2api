@@ -1,26 +1,27 @@
 # DeepSeek2API
 
-支持高速流式输出、支持多轮对话、支持深度思考、支持联网搜索、支持专家模式、支持工具调用（Function Calling），多路账号支持。
+支持高速流式输出、多轮对话、深度思考、联网搜索、专家模式、工具调用（Function Calling）、Vision 视觉识别、文件上传，多路账号自动轮换。
 
 与 OpenAI / Claude 接口完全兼容。
 
 ## 目录
 
 * [免责声明](#免责声明)
+* [新特性](#新特性)
 * [接入准备](#接入准备)
   * [多账号接入](#多账号接入)
 * [Docker部署](#Docker部署)
 * [Docker-compose部署](#Docker-compose部署)
-* [Vercel部署](#Vercel部署)
 * [原生部署](#原生部署)
 * [接口列表](#接口列表)
   * [模型列表](#模型列表)
   * [对话补全](#对话补全)
   * [工具调用](#工具调用)
+  * [Vision 视觉](#Vision-视觉)
+  * [文件上传](#文件上传)
   * [Claude API](#claude-api)
 * [注意事项](#注意事项)
   * [Nginx反代优化](#Nginx反代优化)
-  * [Token统计](#Token统计)
 * [Star History](#star-history)
 * [鸣谢](#鸣谢)
 
@@ -29,6 +30,15 @@
 **逆向API是不稳定的，建议前往DeepSeek官方 https://platform.deepseek.com/ 付费使用API，避免封禁的风险。**
 
 **本组织和个人不接受任何资金捐助和交易，此项目是纯粹研究交流学习性质！**
+
+> ⚠️ 近期 DeepSeek 加强了对第三方客户端的检测。本项目已针对 `device_id` 指纹做出防护（每个账号自动生成独立随机 device_id），并与其他同类项目（如 ds2api-main）在指纹上产生差异化。但封杀策略随时可能调整，使用需自担风险。
+
+## 新特性
+
+- 🛡️ **device_id 随机化**：每个账号启动时自动生成 64 字节随机 device_id，与官方客户端格式一致，避免指纹被检测
+- 🖼️ **Vision 视觉识别**：支持 OpenAI 格式的 `image_url` 图片输入（data: URL），自动上传至 DeepSeek 并关联到对话
+- 📁 **文件上传**：`/v1/files` 端点支持 multipart 文件上传，兼容 OpenAI Files API
+- 🔄 **Prompt 格式对齐**：与 DeepSeek 官方 prompt 标记格式保持一致
 
 ## 接入准备
 
@@ -57,33 +67,32 @@
     {
       "email": "example1@example.com",
       "password": "password1",
-      "token": ""
+      "token": "",
+      "device_id": ""
     },
     {
       "email": "example2@example.com",
       "password": "password2",
-      "token": ""
+      "token": "",
+      "device_id": ""
     },
     {
       "mobile": "12345678901",
       "password": "password3",
-      "token": ""
-    },
-    {
-      "mobile": "12345678901",
-      "password": "password4",
-      "token": ""
+      "token": "",
+      "device_id": ""
     }
   ]
 }
 ```
- * keys - 你的 API 鉴权密钥
- * accounts - DeepSeek 账号列表，支持多个账号轮换，避免单账号受限
+ * `keys` - 你的 API 鉴权密钥
+ * `accounts` - DeepSeek 账号列表，支持多个账号轮换
+ * `device_id` - 留空即可，**服务启动时会自动为每个账号生成独立的随机 device_id 并持久化**，无需手动填写
 
 拉取镜像并启动服务。
 
 ```shell
-docker run -d -p 5001:5001 -v "$(pwd)/config.json:/app/config.json" --name deepseek2api ghcr.io/iidamie/deepseek2api:latest
+docker run -d -p 5001:5001 -v "$(pwd)/config.json:/app/config.json" --name deepseek2api ghcr.io/komeiji-shiki/deepseek2api:latest
 ```
 
 查看服务实时日志
@@ -108,14 +117,15 @@ docker stop deepseek2api
 
 拉取该项目
 ```shell
-git clone https://github.com/iidamie/deepseek2api.git
+git clone https://github.com/Komeiji-Shiki/deepseek2api.git
 cd deepseek2api
 ```
 配置 config.json
 
 在当前目录下，修改 config.json 文件
- * keys - 你的 API 鉴权密钥
- * accounts - DeepSeek 账号列表，支持多个账号轮换，避免单账号受限
+ * `keys` - 你的 API 鉴权密钥
+ * `accounts` - DeepSeek 账号列表
+ * `device_id` - 留空即可，自动生成
 
 启动服务
 
@@ -141,22 +151,6 @@ docker restart deepseek2api
 docker stop deepseek2api
 ```
 
-## Vercel部署
-
-> [!NOTE]
-> Vercel免费账户的请求响应超时时间为10秒，但接口响应通常较久，可能会遇到Vercel返回的504超时错误！
-
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/import/project?template=https://github.com/iidamie/deepseek2api)
-
-部署完后，返回你的 Github 仓库配置 config.json
- * keys - 你的 API 鉴权密钥
- * accounts - DeepSeek 账号列表，支持多个账号轮换，避免单账号受限
-
-> [!WARNING]  
-> 一定要是私库，防止信息泄露！
-
-配置完后，返回 Vercel 控制台，重新部署即可
-
 ## 原生部署
 
 请准备一台具有公网IP的服务器并将5001端口开放。
@@ -166,16 +160,23 @@ docker stop deepseek2api
 安装依赖
 
 ```shell
-git clone https://github.com/iidamie/deepseek2api.git
+git clone https://github.com/Komeiji-Shiki/deepseek2api.git
 cd deepseek2api
 pip install -r requirements.txt
+```
+
+初次运行前，先下载 WASM（PoW 计算所需）：
+
+```shell
+python fetch_wasm.py
 ```
 
 配置 config.json
 
 在当前目录下，修改 config.json 文件
- * keys - 你的 API 鉴权密钥
- * accounts - DeepSeek 账号列表，支持多个账号轮换，避免单账号受限
+ * `keys` - 你的 API 鉴权密钥
+ * `accounts` - DeepSeek 账号列表
+ * `device_id` - 留空即可，启动时自动生成随机 device_id 并持久化到配置文件
 
 启动服务
 
@@ -191,7 +192,7 @@ nohup uvicorn app:app --host 0.0.0.0 --port 5001 > uvicorn.log 2>&1 &
 
 ## 接口列表
 
-目前支持与openai兼容的 `/v1/chat/completions` 接口，可自行使用与openai或其他兼容的客户端接入接口。
+目前支持与 OpenAI 兼容的接口，可自行使用与 OpenAI 或其他兼容的客户端接入。
 
 ### 模型列表
 
@@ -270,10 +271,10 @@ nohup uvicorn app:app --host 0.0.0.0 --port 5001 > uvicorn.log 2>&1 &
 
 | 模型 ID | 说明 |
 |---------|------|
-| `deepseek-chat` / `deepseek-v？` | 标准对话模型 |
-| `deepseek-reasoner` / `deepseek-v?` | 思考模型 |
-| `deepseek-chat-search` / `deepseek-v?-search` | 标准模型 + 联网搜索 |
-| `deepseek-reasoner-search` / `deepseek-v?-search` | 深度思考 + 联网搜索 |
+| `deepseek-chat` / `deepseek-v3` | 标准对话模型 |
+| `deepseek-reasoner` / `deepseek-r1` | 思考模型 |
+| `deepseek-chat-search` / `deepseek-v3-search` | 标准模型 + 联网搜索 |
+| `deepseek-reasoner-search` / `deepseek-r1-search` | 深度思考 + 联网搜索 |
 
 **专家模式：**
 
@@ -283,41 +284,29 @@ nohup uvicorn app:app --host 0.0.0.0 --port 5001 > uvicorn.log 2>&1 &
 | `deepseek-expert-reasoner` | 专家模式 + 深度思考 |
 | `deepseek-expert-search` | 专家模式 + 联网搜索 |
 | `deepseek-expert-reasoner-search` | 专家模式 + 深度思考 + 联网搜索 |
-```
 
 ### 对话补全
 
-对话补全接口，与openai的 [chat-completions-api](https://platform.openai.com/docs/guides/text-generation/chat-completions-api) 兼容。
+对话补全接口，与 OpenAI 的 [chat-completions-api](https://platform.openai.com/docs/guides/text-generation/chat-completions-api) 兼容。
 
 **POST /v1/chat/completions**
 
 header 需要设置 Authorization 头部：
 
 ```
-Authorization: Bearer [userToken value or keys]
+Authorization: Bearer [keys 中的任意值 或 DeepSeek Token]
 ```
 
 请求数据：
 ```json
 {
-    // model名称
-    // 默认：deepseek-chat
-    // 深度思考：deepseek-reasoner
-    // 联网搜索：deepseek-chat-search
-    // 联网搜索 + 思考：deepseek-reasoner-search
-    // 专家模式：deepseek-expert
-    // 专家模式 + 思考：deepseek-expert-reasoner
-    // 专家模式 + 联网搜索：deepseek-expert-search
-    // 专家模式 + 思考 + 联网搜索：deepseek-expert-reasoner-search
     "model": "deepseek-chat",
-    // 多轮对话基于消息合并实现，某些场景可能导致能力下降且受单轮最大token数限制
     "messages": [
         {
             "role": "user",
             "content": "你是谁？"
         }
     ],
-    // 如果使用流式响应请设置为true，默认false
     "stream": false
 }
 ```
@@ -330,55 +319,23 @@ Authorization: Bearer [userToken value or keys]
       "finish_reason": "stop",
       "index": 0,
       "message": {
-        "content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek-R1。如您有任何任何问题，我会尽我所能为您提供帮助。",
-        "reasoning_content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek-R1。如您有任何任何问题，我会尽我所能为您提供帮助。\n",
+        "content": "您好！我是由深度求索公司开发的智能助手。",
+        "reasoning_content": "嗯，用户问我是谁...",
         "role": "assistant"
       }
     }
   ],
   "created": 1738598554,
   "id": "bc223da6-f091-4687-9f59-b9f2a917bd49",
-  "model": "deepseek-r1",
+  "model": "deepseek-chat",
   "object": "chat.completion",
   "usage": {
     "completion_tokens": 37,
-    "prompt_tokens": 1,
-    "total_tokens": 38
-  }
-}
-```
-
-## 注意事项
-
-### Nginx反代优化
-
-如果您正在使用Nginx反向代理deepseek2api，请添加以下配置项优化流的输出效果，优化体验感。
-
-```nginx
-# 关闭代理缓冲。当设置为off时，Nginx会立即将客户端请求发送到后端服务器，并立即将从后端服务器接收到的响应发送回客户端。
-proxy_buffering off;
-# 启用分块传输编码。分块传输编码允许服务器为动态生成的内容分块发送数据，而不需要预先知道内容的大小。
-chunked_transfer_encoding on;
-# 开启TCP_NOPUSH，这告诉Nginx在数据包发送到客户端之前，尽可能地发送数据。这通常在sendfile使用时配合使用，可以提高网络效率。
-tcp_nopush on;
-# 开启TCP_NODELAY，这告诉Nginx不延迟发送数据，立即发送小数据包。在某些情况下，这可以减少网络的延迟。
-tcp_nodelay on;
-# 设置保持连接的超时时间，这里设置为120秒。如果在这段时间内，客户端和服务器之间没有进一步的通信，连接将被关闭。
-keepalive_timeout 120;
-```
-
-### Token统计
-
-符合 OPENAI 接口规范
-
-示例:
-```json
-"usage": {
-  "completion_tokens": 37,
-  "prompt_tokens": 1,
-  "total_tokens": 38,
-  "completion_tokens_details": {
-    "reasoning_tokens": 28
+    "prompt_tokens": 4,
+    "total_tokens": 41,
+    "completion_tokens_details": {
+      "reasoning_tokens": 12
+    }
   }
 }
 ```
@@ -413,6 +370,59 @@ keepalive_timeout 120;
 
 工具调用结果会以 `tool_calls` 形式返回，后续对话需要传递 `tool` 角色的消息来返回工具执行结果。
 
+### Vision 视觉
+
+支持 OpenAI 格式的 `image_url` 图片输入。服务会自动将图片上传至 DeepSeek 并关联到对话上下文。
+
+请求示例：
+```json
+{
+    "model": "deepseek-chat",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "这张图片里有什么？"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,iVBORw0KGgo..."
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
+
+> 支持 data: URL 格式（base64），不支持外部 HTTP URL。
+
+### 文件上传
+
+**POST /v1/files**
+
+支持 multipart/form-data 文件上传，兼容 OpenAI Files API。
+
+```shell
+curl -X POST http://localhost:5001/v1/files \
+  -H "Authorization: Bearer key1" \
+  -F "file=@document.pdf" \
+  -F "purpose=user_data"
+```
+
+响应：
+```json
+{
+  "id": "file_xxx",
+  "object": "file",
+  "bytes": 1024,
+  "created_at": 1700000000,
+  "filename": "document.pdf",
+  "purpose": "user_data",
+  "status": "uploaded"
+}
+```
+
 ### Claude API
 
 除 OpenAI 兼容接口外，还提供 Claude API 兼容接口：
@@ -421,12 +431,45 @@ keepalive_timeout 120;
 - **POST** `/anthropic/v1/messages` - 对话补全
 - **POST** `/anthropic/v1/messages/count_tokens` - Token 计数
 
-支持 Claude 格式的 `tools`、`thinking` 等功能。
+支持 Claude 格式的 `tools`、`thinking`、`tool_use` 等功能，同样支持 Vision 视觉输入。
+
+## 注意事项
+
+### Nginx反代优化
+
+如果您正在使用Nginx反向代理deepseek2api，请添加以下配置项优化流的输出效果。
+
+```nginx
+proxy_buffering off;
+chunked_transfer_encoding on;
+tcp_nopush on;
+tcp_nodelay on;
+keepalive_timeout 120;
+```
+
+### Token统计
+
+符合 OpenAI 接口规范，包含 `reasoning_tokens` 细分统计：
+
+```json
+"usage": {
+  "completion_tokens": 37,
+  "prompt_tokens": 4,
+  "total_tokens": 41,
+  "completion_tokens_details": {
+    "reasoning_tokens": 12
+  }
+}
+```
+
+### device_id 指纹
+
+为防止被 DeepSeek 根据设备指纹封杀，服务启动时会自动为每个配置的账号生成独立的随机 `device_id`（64 字节 Base64 编码，与官方客户端格式一致）。`device_id` 会自动写入 `config.json`，重启后保持不变。
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=iidamie/deepseek2api&type=Date)](https://star-history.com/#iidamie/deepseek2api&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Komeiji-Shiki/deepseek2api&type=Date)](https://star-history.com/#Komeiji-Shiki/deepseek2api&Date)
 
 ## 鸣谢
 
-本项目部分代码参考了 [deepseek2api](https://github.com/iidamie/deepseek2api)，在此表示感谢
+本项目部分代码参考了 [deepseek2api](https://github.com/iidamie/deepseek2api) 和 [ds2api](https://github.com/CJackHwang/ds2api)，在此表示感谢。
