@@ -467,15 +467,13 @@ def normalize_openai_messages(messages: Iterable[dict[str, Any]]) -> list[dict[s
 
         if role == "tool":
             tool_call_id = str(message.get("tool_call_id", "")).strip()
-            tool_name = tool_name_by_id.get(tool_call_id, "unknown_tool")
             tool_result_text = normalize_text_content(message.get("content"))
+            if not tool_result_text.strip():
+                tool_result_text = "null"
             normalized.append(
                 {
-                    "role": "user",
-                    "content": (
-                        f"Tool result for {tool_name} "
-                        f"(tool_call_id={tool_call_id or 'unknown'}):\n{tool_result_text}"
-                    ),
+                    "role": "tool",
+                    "content": tool_result_text,
                 }
             )
             continue

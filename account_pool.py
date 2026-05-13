@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import os
 import random
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, Iterable
+
+
+def generate_device_id() -> str:
+    """生成一个类似 DeepSeek 官方客户端的 device_id（64 字节随机数据的 Base64 编码）。"""
+    raw = os.urandom(64)
+    return base64.b64encode(raw).decode("ascii")
 
 
 def get_account_identifier(account: dict[str, Any]) -> str:
@@ -42,11 +50,18 @@ class AccountPool:
     def __init__(self, accounts: Iterable[dict[str, Any]]):
         self._accounts_by_id: dict[str, dict[str, Any]] = {}
         account_ids: list[str] = []
+        generated_count = 0
 
         for account in accounts:
             account_id = get_account_identifier(account)
             if not account_id or account_id in self._accounts_by_id:
                 continue
+            # 没有 device_id 或为空则自动生成
+            existing = str(account.get("device_id", "")).strip()
+            if not existing or existing == "deepseek_to_api":
+                account["device_id"] = generate_device_id()
+                generated_count += 1
+
             self._accounts_by_id[account_id] = account
             account_ids.append(account_id)
 
@@ -54,6 +69,10 @@ class AccountPool:
         self._available: Deque[str] = deque(account_ids)
         self._in_use: set[str] = set()
         self._lock = asyncio.Lock()
+
+        if generated_count:
+            import logging
+            logging.getLogger("deepseek2api").info("[AccountPool] 为 %d 个账号生成了新的 device_id", generated_count)
 
     def has_accounts(self) -> bool:
         return bool(self._accounts_by_id)
