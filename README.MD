@@ -297,15 +297,15 @@ Authorization: Bearer [userToken value or keys]
       "finish_reason": "stop",
       "index": 0,
       "message": {
-        "content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek-R1。如您有任何任何问题，我会尽我所能为您提供帮助。",
-        "reasoning_content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek-R1。如您有任何任何问题，我会尽我所能为您提供帮助。\n",
+        "content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek。如您有任何任何问题，我会尽我所能为您提供帮助。",
+        "reasoning_content": "您好！我是由中国的深度求索（DeepSeek）公司开发的智能助手DeepSeek。如您有任何任何问题，我会尽我所能为您提供帮助。\n",
         "role": "assistant"
       }
     }
   ],
   "created": 1738598554,
   "id": "bc223da6-f091-4687-9f59-b9f2a917bd49",
-  "model": "deepseek-r1",
+  "model": "deepseek-reasoner",
   "object": "chat.completion",
   "usage": {
     "completion_tokens": 37,
