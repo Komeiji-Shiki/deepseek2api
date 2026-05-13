@@ -1,0 +1,30 @@
+{
+  "auto_delete_sessions": true,
+  "inject_integrity_guard": false,
+  "keys": [
+    "key1",
+    "key2"
+  ],
+  "accounts": [
+    {
+      "email": "example1@example.com",
+      "password": "password1",
+      "token": ""
+    },
+    {
+      "email": "example2@example.com",
+      "password": "password2",
+      "token": ""
+    },
+    {
+      "mobile": "12345678901",
+      "password": "password3",
+      "token": ""
+    },
+    {
+      "mobile": "12345678901",
+      "password": "password4",
+      "token": ""
+    }
+  ]
+}
