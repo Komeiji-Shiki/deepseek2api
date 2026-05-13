@@ -23,6 +23,8 @@ from fastapi.templating import Jinja2Templates
 from wasmtime import Linker, Module, Store
 
 from account_pool import AccountLease, AccountPool
+from file_upload import build_multipart_body, extract_file_id, preprocess_inline_files
+from file_upload import DEEPSEEK_UPLOAD_FILE_URL, DEEPSEEK_UPLOAD_TARGET_PATH
 from tool_calling import (
     XmlToolCallStreamParser,
     build_tool_system_prompt,
@@ -55,17 +57,73 @@ DEEPSEEK_COMPLETION_URL = f"https://{DEEPSEEK_HOST}/api/v0/chat/completion"
 
 BASE_HEADERS = {
     "Host": DEEPSEEK_HOST,
-    "User-Agent": "DeepSeek/1.8.0 Android/35",
+    "User-Agent": "DeepSeek/2.1.0 Android/35",
     "Accept": "application/json",
-    "Accept-Encoding": "gzip",
+    "Accept-Encoding": "gzip, br",
     "Content-Type": "application/json",
     "x-client-platform": "android",
-    "x-client-version": "1.8.0",
+    "x-client-version": "2.1.0",
     "x-client-locale": "zh_CN",
     "accept-charset": "UTF-8",
 }
 
 OPENAI_MODELS = [
+    {
+        "id": "deepseek-chat",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-reasoner",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-chat-search",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-reasoner-search",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-expert",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-expert-reasoner",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-expert-search",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+    {
+        "id": "deepseek-expert-reasoner-search",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
     {
         "id": "deepseek-default-chat",
         "object": "model",
@@ -102,26 +160,28 @@ OPENAI_MODELS = [
         "permission": [],
     },
     {
-        "id": "deepseek-expert-reasoner",
-        "object": "model",
-        "created": 1677610602,
-        "owned_by": "deepseek",
-        "permission": [],
-    },
-    {
         "id": "deepseek-expert-chat-search",
         "object": "model",
         "created": 1677610602,
         "owned_by": "deepseek",
         "permission": [],
     },
+
     {
-        "id": "deepseek-expert-reasoner-search",
+        "id": "deepseek-vision-chat",
         "object": "model",
         "created": 1677610602,
         "owned_by": "deepseek",
         "permission": [],
     },
+    {
+        "id": "deepseek-vision-reasoner",
+        "object": "model",
+        "created": 1677610602,
+        "owned_by": "deepseek",
+        "permission": [],
+    },
+
 ]
 
 CLAUDE_MODELS = [
@@ -320,28 +380,20 @@ def build_usage(prompt: str, reasoning: str, content: str) -> dict[str, Any]:
 
 def resolve_deepseek_model_features(model: str) -> tuple[bool, bool, bool]:
     normalized = model.strip().lower()
-    # default 模式: chat (无推理, 无搜索)
-    if normalized in {"deepseek-default-chat", "deepseek-chat", "deepseek-v3"}:
+    if normalized in {"deepseek-v3", "deepseek-chat"}:
         return False, False, False
-    # default 模式: chat + 搜索
-    if normalized in {"deepseek-default-chat-search", "deepseek-chat-search", "deepseek-v3-search"}:
-        return False, True, False
-    # default 模式: reasoner (推理)
-    if normalized in {"deepseek-default-reasoner", "deepseek-reasoner", "deepseek-r1"}:
+    if normalized in {"deepseek-r1", "deepseek-reasoner"}:
         return True, False, False
-    # default 模式: reasoner + 搜索
-    if normalized in {"deepseek-default-reasoner-search", "deepseek-reasoner-search", "deepseek-r1-search"}:
+    if normalized in {"deepseek-v3-search", "deepseek-chat-search"}:
+        return False, True, False
+    if normalized in {"deepseek-r1-search", "deepseek-reasoner-search"}:
         return True, True, False
-    # expert 模式: chat
-    if normalized in {"deepseek-expert-chat", "deepseek-expert"}:
+    if normalized in {"deepseek-expert"}:
         return False, False, True
-    # expert 模式: reasoner
     if normalized in {"deepseek-expert-reasoner"}:
         return True, False, True
-    # expert 模式: chat + 搜索
-    if normalized in {"deepseek-expert-chat-search", "deepseek-expert-search"}:
+    if normalized in {"deepseek-expert-search"}:
         return False, True, True
-    # expert 模式: reasoner + 搜索
     if normalized in {"deepseek-expert-reasoner-search"}:
         return True, True, True
     raise HTTPException(status_code=503, detail=f"Model '{model}' is not available.")
@@ -361,34 +413,39 @@ def map_claude_model_to_deepseek(model: str) -> str:
     return mapping.get("fast", "deepseek-chat")
 
 
+OUTPUT_INTEGRITY_GUARD = (
+    "Output integrity guard:"
+    " If upstream context, tool output, or parsed text contains garbled, corrupted,"
+    " partially parsed, repeated, or otherwise malformed fragments,"
+    " do not imitate or echo them; output only the correct content for the user."
+)
+
+
 def messages_prepare(messages: list[dict[str, Any]], *, thinking_enabled: bool = False) -> str:
+    if not messages:
+        return ""
+
+    # 注入 Output Integrity Guard（仿 ds2api-main）
+    first_role = str(messages[0].get("role", "")).strip().lower()
+    if first_role != "system" or OUTPUT_INTEGRITY_GUARD.split(":")[0] not in str(messages[0].get("content", "")):
+        messages = [{"role": "system", "content": OUTPUT_INTEGRITY_GUARD}] + messages
+
     processed: list[dict[str, str]] = []
-    first_system_seen = False
     for message in messages:
         role = str(message.get("role", "")).strip()
         content = message.get("content", "")
         if isinstance(content, list):
             parts = []
             for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
+                if isinstance(item, dict) and str(item.get("type", "")).lower() in ("text", "output_text", "input_text"):
                     parts.append(str(item.get("text", "")))
-                else:
-                    parts.append(normalize_text_content(item))
             text = "\n".join(part for part in parts if part)
         else:
             text = normalize_text_content(content)
 
-        if role == "system":
-            if not first_system_seen:
-                first_system_seen = True
-                text = f"<system_instructions>{text}</system_instructions>"
-            role = "user"
-
         processed.append({"role": role, "text": text})
 
-    if not processed:
-        return ""
-
+    # 合并连续同角色消息
     merged = [processed[0]]
     for message in processed[1:]:
         if message["role"] == merged[-1]["role"]:
@@ -396,35 +453,48 @@ def messages_prepare(messages: list[dict[str, Any]], *, thinking_enabled: bool =
         else:
             merged.append(message)
 
-    parts: list[str] = []
-    for index, block in enumerate(merged):
-        role = block["role"]
+    parts: list[str] = ["<|begin▁of▁sentence|>"]
+    last_role = ""
+    for block in merged:
+        role = block["role"].strip().lower()
         text = block["text"]
-        if role == "assistant":
-            if thinking_enabled:
-                parts.append(f"<｜Assistant｜><｜end▁of▁thinking｜>{text}<｜end▁of▁sentence｜>")
-            else:
-                parts.append(f"<｜Assistant｜>{text}<｜end▁of▁sentence｜>")
+        last_role = role
+        if role == "system":
+            if text.strip():
+                parts.append(f"<|System|>{text}<|end▁of▁instructions|>")
         elif role == "user":
-            if index > 0:
-                parts.append(f"<｜User｜>{text}")
-            else:
-                parts.append(text)
-        else:
-            parts.append(text)
+            parts.append(f"<|User|>{text}")
+        elif role == "assistant":
+            parts.append(f"<|Assistant|>{text}<|end▁of▁sentence|>")
+        elif role == "tool":
+            if text.strip():
+                parts.append(f"<|Tool|>{text}<|end▁of▁toolresults|>")
+
 
     final_prompt = "".join(parts)
     final_prompt = re.sub(r"!\[(.*?)\]\((.*?)\)", r"[\1](\2)", final_prompt)
     return final_prompt
 
 
-def is_finished_status_chunk(chunk: dict[str, Any]) -> bool:
-    """判断是否为整体响应完成的状态事件。
 
-    只有 response/status 或 response/quasi_status 为 FINISHED 时才算完成。
-    fragment 级别的 status（如 response/fragments/-2/status）不算整体完成。
-    """
+def is_finished_status_chunk(chunk: dict[str, Any]) -> bool:
     if not isinstance(chunk, dict):
+        return False
+
+    def is_finished_value(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.strip().upper() == "FINISHED"
+        if isinstance(value, list):
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                item_path = str(item.get("p", "")).strip().lower()
+                item_value = item.get("v")
+                if item_path.endswith("status") and isinstance(item_value, str):
+                    if item_value.strip().upper() == "FINISHED":
+                        return True
+                if is_finished_value(item_value):
+                    return True
         return False
 
     if str(chunk.get("status", "")).strip().upper() == "FINISHED":
@@ -432,24 +502,10 @@ def is_finished_status_chunk(chunk: dict[str, Any]) -> bool:
 
     path = str(chunk.get("p", "")).strip().lower()
     value = chunk.get("v")
-
-    # 只有 response/status 才算整体完成，fragment 级别的 status 不算
-    if path in ("response/status", "response/quasi_status") and isinstance(value, str):
+    if path.endswith("status") and isinstance(value, str):
         return value.strip().upper() == "FINISHED"
 
-    # BATCH 操作中检查是否有 response/status 或 quasi_status 为 FINISHED
-    if isinstance(value, list) and path == "response" and chunk.get("o") == "BATCH":
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            item_path = str(item.get("p", "")).strip().lower()
-            item_value = item.get("v")
-            if item_path in ("status", "quasi_status") and isinstance(item_value, str):
-                if item_value.strip().upper() == "FINISHED":
-                    return True
-        return False
-
-    return False
+    return is_finished_value(value)
 
 
 def _is_claude_tool_result_message(message: dict[str, Any]) -> bool:
@@ -587,11 +643,14 @@ async def login_deepseek_via_account(request: Request, account: dict[str, Any]) 
             detail="账号缺少必要的登录信息（必须提供 email 或 mobile 以及 password）",
         )
 
+    # 读取账号专属 device_id（AccountPool 初始化时已自动生成为 64 字节随机 Base64）
+    device_id = str(account.get("device_id", "")).strip()
+
     if email:
         payload = {
             "email": email,
             "password": password,
-            "device_id": "deepseek_to_api",
+            "device_id": device_id,
             "os": "android",
         }
     else:
@@ -599,7 +658,7 @@ async def login_deepseek_via_account(request: Request, account: dict[str, Any]) 
             "mobile": mobile,
             "area_code": None,
             "password": password,
-            "device_id": "deepseek_to_api",
+            "device_id": device_id,
             "os": "android",
         }
 
@@ -708,17 +767,15 @@ async def determine_mode_and_token(request: Request) -> AuthContext:
         )
         if not ACCOUNT_POOL.has_accounts():
             raise HTTPException(
-                status_code=503,
-                detail="No accounts configured in config.json.",
+                status_code=429,
+                detail="No accounts configured or all accounts are busy.",
             )
 
         auth_ctx = AuthContext(use_config_token=True, deepseek_token="")
         if not await assign_account_lease(request, auth_ctx):
-            # 区分是"所有账号忙"还是"所有账号都不可用"
-            total_accounts = ACCOUNT_POOL.size()
             raise HTTPException(
-                status_code=503,
-                detail=f"All {total_accounts} account(s) are currently busy or unavailable.",
+                status_code=429,
+                detail="No accounts configured or all accounts are busy.",
             )
         logger.info(
             "[determine_mode_and_token] 分配到账号, token=%s...",
@@ -1022,6 +1079,111 @@ def _sync_completion_post(
     )
 
 
+def _upload_file_to_deepseek_sync(
+    data: bytes,
+    filename: str,
+    content_type: str,
+    token: str,
+    base_headers: dict[str, str],
+    *,
+    model_type: str = "default",
+    max_attempts: int = 3,
+) -> str | None:
+    """纯同步上传文件到 DeepSeek（PoW 计算 + multipart 上传）。"""
+    if not data or not token:
+        return None
+
+    auth_headers = {**base_headers, "authorization": f"Bearer {token}"}
+
+    # 获取上传 PoW（同步）
+    pow_header: str | None = None
+    for attempt in range(max_attempts):
+        resp = None
+        try:
+            resp = requests.post(
+                DEEPSEEK_CREATE_POW_URL,
+                headers=auth_headers,
+                json={"target_path": DEEPSEEK_UPLOAD_TARGET_PATH},
+                timeout=30,
+                impersonate="safari15_3",
+            )
+            data_resp = resp.json()
+            if resp.status_code == 200 and data_resp.get("code") == 0:
+                challenge = data_resp.get("data", {}).get("biz_data", {}).get("challenge", {})
+                if challenge.get("algorithm") == "DeepSeekHashV1":
+                    wasm_path = resolve_wasm_path()
+                    answer = compute_pow_answer(
+                        challenge["algorithm"],
+                        challenge["challenge"],
+                        challenge["salt"],
+                        challenge.get("difficulty", 144000),
+                        challenge.get("expire_at", 1680000000),
+                        challenge["signature"],
+                        challenge["target_path"],
+                        wasm_path,
+                    )
+                    if answer is not None:
+                        pow_dict = {
+                            "algorithm": challenge["algorithm"],
+                            "challenge": challenge["challenge"],
+                            "salt": challenge["salt"],
+                            "answer": answer,
+                            "signature": challenge["signature"],
+                            "target_path": challenge["target_path"],
+                        }
+                        pow_str = json.dumps(pow_dict, separators=(",", ":"), ensure_ascii=False)
+                        pow_header = base64.b64encode(pow_str.encode("utf-8")).decode("utf-8").rstrip()
+                        break
+        except Exception as exc:
+            logger.warning("[upload_sync] PoW 获取异常 (attempt %d): %s", attempt + 1, exc)
+        finally:
+            if resp is not None:
+                resp.close()
+
+    if not pow_header:
+        logger.warning("[upload_sync] 无法获取上传 PoW")
+        return None
+
+    # 构建并发送上传请求
+    body, multipart_ct = build_multipart_body(filename, content_type, data)
+    upload_headers = {
+        **auth_headers,
+        "Content-Type": multipart_ct,
+        "x-ds-pow-response": pow_header,
+        "x-file-size": str(len(data)),
+        "x-thinking-enabled": "1",
+    }
+    if model_type:
+        upload_headers["x-model-type"] = model_type
+
+    resp = None
+    try:
+        resp = requests.post(
+            DEEPSEEK_UPLOAD_FILE_URL,
+            headers=upload_headers,
+            data=body,
+            timeout=60,
+            impersonate="safari15_3",
+        )
+        resp_data = resp.json()
+    except Exception as exc:
+        logger.error("[upload_sync] 上传请求异常: %s", exc)
+        return None
+    finally:
+        if resp is not None:
+            resp.close()
+
+    code = resp_data.get("code", -1)
+    if resp.status_code != 200 or code != 0:
+        logger.warning("[upload_sync] 上传失败: status=%s, code=%s, msg=%s", resp.status_code, code, resp_data.get("msg"))
+        return None
+
+    file_id = extract_file_id(resp_data)
+    if file_id:
+        logger.info("[upload_sync] 上传成功, file_id=%s, filename=%s", file_id, filename)
+    return file_id
+
+
 async def call_completion_endpoint(
     request: Request,
     headers: dict[str, str],
@@ -1054,143 +1216,12 @@ async def call_completion_endpoint(
     return None
 
 
-def _format_search_tool_call(fragment: dict[str, Any], is_first: bool = False) -> str | None:
-    """将 TOOL_SEARCH fragment 转换为思维链中的工具调用文本格式"""
-    frag_type = str(fragment.get("type", "")).strip().upper()
-    if frag_type != "TOOL_SEARCH":
-        return None
-    
-    queries = fragment.get("queries", [])
-    if not queries or not isinstance(queries, list):
-        return None
-    
-    # 提取所有查询
-    query_list = []
-    for q in queries:
-        if isinstance(q, dict) and q.get("query"):
-            query_list.append(q["query"])
-    
-    if not query_list:
-        return None
-    
-    # 构建工具调用格式
-    tool_input = {
-        "query": query_list[0] if query_list else "",
-    }
-    
-    # 如果有多个查询，尝试从查询内容推断 time_range
-    if len(query_list) > 1:
-        combined = " ".join(query_list)
-        if any(kw in combined for kw in ["今日", "今天", "最新", "latest", "today"]):
-            tool_input["time_range"] = "day"
-        elif any(kw in combined for kw in ["本周", "这周", "week"]):
-            tool_input["time_range"] = "week"
-        elif any(kw in combined for kw in ["本月", "这月", "month"]):
-            tool_input["time_range"] = "month"
-    
-    prefix = "\n" if is_first else ""
-    return f"{prefix}「调用工具: search 输入内容: {json.dumps(tool_input, ensure_ascii=False)}」\n"
-
-
-def _is_citation_or_reference(text: str) -> bool:
-    return text.startswith("[citation:") or text.startswith("[reference:")
-
-
-def _emit_fragment_events(
-    fragment: dict[str, Any],
-    *,
-    search_enabled: bool,
-    current_event_type: str,
-    is_first_tool_call: bool = False,
-) -> tuple[list[dict[str, str]], str, bool]:
-    """统一处理单个 fragment，返回要 yield 的事件列表。
-
-    Returns:
-        (events, updated_current_event_type, updated_is_first_tool_call)
-    """
-    events: list[dict[str, str]] = []
-    frag_type = str(fragment.get("type", "")).strip().upper()
-
-    if frag_type == "TIP":
-        return events, current_event_type, is_first_tool_call
-
-    # TOOL_SEARCH — 搜索查询
-    if frag_type == "TOOL_SEARCH" and search_enabled:
-        tool_call_text = _format_search_tool_call(fragment, is_first=is_first_tool_call)
-        if tool_call_text:
-            events.append({"type": "thinking", "content": tool_call_text})
-            is_first_tool_call = False
-        content = fragment.get("content", "")
-        if isinstance(content, str) and content and not _is_citation_or_reference(content):
-            events.append({"type": current_event_type, "content": content})
-        return events, current_event_type, is_first_tool_call
-
-    # TOOL_OPEN — 打开/浏览网页
-    if frag_type == "TOOL_OPEN" and search_enabled:
-        prefix = "\n" if is_first_tool_call else ""
-        result = fragment.get("result")
-        ref = fragment.get("reference")
-        if isinstance(result, dict) and result:
-            url = result.get("url", "")
-            title = result.get("title", "")
-            site_name = result.get("site_name", "")
-            if title:
-                source = site_name or "网页"
-                events.append({"type": "thinking", "content": f"{prefix}「浏览: [{source}] {title[:40]}{'...' if len(title) > 40 else ''}」\n"})
-                is_first_tool_call = False
-            elif url:
-                events.append({"type": "thinking", "content": f"{prefix}「打开: {url[:60]}{'...' if len(url) > 60 else ''}」\n"})
-                is_first_tool_call = False
-        elif isinstance(ref, dict):
-            events.append({"type": "thinking", "content": f"{prefix}「继续浏览页面...」\n"})
-            is_first_tool_call = False
-        return events, current_event_type, is_first_tool_call
-
-    # TOOL_FIND — 页面内查找
-    if frag_type == "TOOL_FIND" and search_enabled:
-        prefix = "\n" if is_first_tool_call else ""
-        pattern = fragment.get("pattern", "")
-        if pattern:
-            events.append({"type": "thinking", "content": f"{prefix}「页面内查找: \"{pattern}\"」\n"})
-            is_first_tool_call = False
-        return events, current_event_type, is_first_tool_call
-
-    # THINK — 思维链
-    if frag_type == "THINK":
-        current_event_type = "thinking"
-        content = fragment.get("content", "")
-        if isinstance(content, str) and content:
-            events.append({"type": "thinking", "content": content})
-            is_first_tool_call = True
-        return events, current_event_type, is_first_tool_call
-
-    # RESPONSE — 最终回复
-    if frag_type == "RESPONSE":
-        current_event_type = "text"
-        content = fragment.get("content", "")
-        if isinstance(content, str) and content:
-            if not (search_enabled and _is_citation_or_reference(content)):
-                events.append({"type": "text", "content": content})
-                is_first_tool_call = True
-        return events, current_event_type, is_first_tool_call
-
-    # 未知类型 — 按内容输出
-    current_event_type = "thinking" if frag_type == "THINK" else "text"
-    content = fragment.get("content", "")
-    if isinstance(content, str) and content:
-        if not (search_enabled and _is_citation_or_reference(content)):
-            events.append({"type": current_event_type, "content": content})
-    return events, current_event_type, is_first_tool_call
-
-
 async def iter_deepseek_events(
     response,
     *,
     search_enabled: bool,
 ):
     current_event_type = "text"
-    is_first_tool_call = True
-    event_count = 0
 
     async for raw_line in response.aiter_lines(decode_unicode=False):
         if isinstance(raw_line, bytes):
@@ -1205,7 +1236,6 @@ async def iter_deepseek_events(
 
         data_str = line[5:].strip()
         if data_str == "[DONE]":
-            logger.info("[iter_deepseek_events] 收到 [DONE]")
             return
 
         try:
@@ -1214,12 +1244,7 @@ async def iter_deepseek_events(
             logger.warning("[iter_deepseek_events] JSON 解析失败: %s", exc)
             raise RuntimeError("Failed to parse upstream event.") from exc
 
-        event_count += 1
-        if event_count <= 10 or event_count % 50 == 0:
-            logger.info("[iter_deepseek_events] 事件 #%d, p=%s", event_count, chunk.get("p", "null"))
-
         if is_finished_status_chunk(chunk):
-            logger.info("[iter_deepseek_events] 收到 FINISHED 状态")
             return
 
         value = chunk.get("v")
@@ -1233,55 +1258,24 @@ async def iter_deepseek_events(
                 fragments = response_obj.get("fragments", [])
                 if fragments:
                     last_fragment = fragments[-1]
-                    fragment_events, current_event_type, is_first_tool_call = _emit_fragment_events(
-                        last_fragment,
-                        search_enabled=search_enabled,
-                        current_event_type=current_event_type,
-                        is_first_tool_call=is_first_tool_call,
-                    )
-                    for event in fragment_events:
-                        yield event
+                    frag_type = str(last_fragment.get("type", "")).strip().upper()
+                    current_event_type = "thinking" if frag_type == "THINK" else "text"
+                    content = last_fragment.get("content", "")
+                    if isinstance(content, str) and content:
+                        if not (search_enabled and content.startswith("[citation:")):
+                            yield {"type": current_event_type, "content": content}
             continue
 
         # 新版 API: 新 fragment 追加 → 类型切换 (THINK → RESPONSE)
         if isinstance(value, list) and path == "response/fragments":
             for fragment in value:
-                if not isinstance(fragment, dict):
-                    continue
-                fragment_events, current_event_type, is_first_tool_call = _emit_fragment_events(
-                    fragment,
-                    search_enabled=search_enabled,
-                    current_event_type=current_event_type,
-                    is_first_tool_call=is_first_tool_call,
-                )
-                for event in fragment_events:
-                    yield event
-            continue
-
-        # 新版 API: BATCH 操作（包含多个 fragment 更新）
-        if isinstance(value, list) and path == "response" and chunk.get("o") == "BATCH":
-            for operation in value:
-                if not isinstance(operation, dict):
-                    continue
-                op_path = str(operation.get("p", "")).strip()
-                op_value = operation.get("v")
-                # 处理 fragments 追加操作
-                if op_path == "fragments" and isinstance(op_value, list):
-                    for fragment in op_value:
-                        if not isinstance(fragment, dict):
-                            continue
-                        fragment_events, current_event_type, is_first_tool_call = _emit_fragment_events(
-                            fragment,
-                            search_enabled=search_enabled,
-                            current_event_type=current_event_type,
-                            is_first_tool_call=is_first_tool_call,
-                        )
-                        for event in fragment_events:
-                            yield event
-                # 处理其他类型的 BATCH 操作（如 has_pending_fragment）
-                elif op_path == "has_pending_fragment":
-                    # 跳过状态更新
-                    continue
+                if isinstance(fragment, dict):
+                    frag_type = str(fragment.get("type", "")).strip().upper()
+                    current_event_type = "thinking" if frag_type == "THINK" else "text"
+                    content = fragment.get("content", "")
+                    if isinstance(content, str) and content:
+                        if not (search_enabled and content.startswith("[citation:")):
+                            yield {"type": current_event_type, "content": content}
             continue
 
         # 跳过非字符串值 (float elapsed_secs, int token_usage 等)
@@ -1306,7 +1300,7 @@ async def iter_deepseek_events(
             continue
 
         # 无路径的字符串值 → 内容 token
-        if search_enabled and _is_citation_or_reference(value):
+        if search_enabled and value.startswith("[citation:"):
             continue
         yield {"type": current_event_type, "content": value}
 
@@ -1364,6 +1358,7 @@ async def start_deepseek_completion(
     deepseek_model: str,
     messages: list[dict[str, Any]],
     output_model: str,
+    ref_file_ids: list[str] | None = None,
 ) -> CompletionContext:
     thinking_enabled, search_enabled, expert_enabled = resolve_deepseek_model_features(deepseek_model)
     final_prompt = messages_prepare(messages, thinking_enabled=thinking_enabled)
@@ -1409,7 +1404,7 @@ async def start_deepseek_completion(
         "parent_message_id": None,
         "model_type": "expert" if expert_enabled else "default",
         "prompt": final_prompt,
-        "ref_file_ids": [],
+        "ref_file_ids": ref_file_ids or [],
         "thinking_enabled": thinking_enabled,
         "search_enabled": search_enabled,
         "preempt": False,
@@ -1606,12 +1601,34 @@ async def chat_completions(request: Request):
         normalized_messages = normalize_openai_messages(raw_messages)
         normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
 
+        # Vision / 文件预处理：上传 inline image，收集 ref_file_ids
+        ref_file_ids: list[str] = []
+        if raw_messages:
+            _base_headers = get_auth_headers(auth_ctx) if auth_ctx else BASE_HEADERS
+            _token = auth_ctx.deepseek_token if auth_ctx else ""
+            _model_type = "expert" if resolve_deepseek_model_features(model)[2] else "default"
+
+            def _sync_upload(data: bytes, filename: str, content_type: str) -> str | None:
+                return _upload_file_to_deepseek_sync(
+                    data, filename, content_type, _token, _base_headers,
+                    model_type=_model_type,
+                )
+
+            # preprocess_inline_files 是同步的，在 asyncio.to_thread 中执行
+            normalized_messages, ref_file_ids = await asyncio.to_thread(
+                preprocess_inline_files,
+                normalized_messages,
+                _sync_upload,
+            )
+            logger.info("[chat_completions] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+
         completion = await start_deepseek_completion(
             request,
             auth_ctx,
             deepseek_model=model,
             messages=normalized_messages,
             output_model=model,
+            ref_file_ids=ref_file_ids,
         )
 
         created_time = int(time.time())
@@ -1907,12 +1924,33 @@ async def claude_messages(request: Request):
             normalized_messages = prepend_system_instruction(normalized_messages, system_prompt)
         normalized_messages = inject_tool_prompt(normalized_messages, tools, tool_choice)
 
+        # Vision / 文件预处理
+        ref_file_ids: list[str] = []
+        if raw_messages:
+            _base_headers = get_auth_headers(auth_ctx) if auth_ctx else BASE_HEADERS
+            _token = auth_ctx.deepseek_token if auth_ctx else ""
+            _model_type = "default"
+
+            def _sync_upload(data: bytes, filename: str, content_type: str) -> str | None:
+                return _upload_file_to_deepseek_sync(
+                    data, filename, content_type, _token, _base_headers,
+                    model_type=_model_type,
+                )
+
+            normalized_messages, ref_file_ids = await asyncio.to_thread(
+                preprocess_inline_files,
+                normalized_messages,
+                _sync_upload,
+            )
+            logger.info("[claude_messages] inline file 预处理完成, ref_file_ids=%d个", len(ref_file_ids))
+
         completion = await start_deepseek_completion(
             request,
             auth_ctx,
             deepseek_model=map_claude_model_to_deepseek(model),
             messages=normalized_messages,
             output_model=model,
+            ref_file_ids=ref_file_ids,
         )
 
         final_reasoning, final_content = await collect_completion_output(completion)
@@ -2135,6 +2173,100 @@ async def claude_count_tokens(request: Request):
             status_code=500,
             content={"error": {"type": "api_error", "message": "Internal Server Error"}},
         )
+
+
+@app.post("/v1/files")
+async def upload_file(request: Request):
+    """OpenAI 兼容文件上传端点。"""
+    auth_ctx: AuthContext | None = None
+    try:
+        auth_ctx = await determine_mode_and_token(request)
+        content_type_header = request.headers.get("Content-Type", "")
+        if "multipart/form-data" not in content_type_header.lower():
+            raise HTTPException(status_code=400, detail="content-type must be multipart/form-data")
+
+        # 读取 multipart 表单
+        body = await request.body()
+        boundary = None
+        for part in content_type_header.split(";"):
+            part = part.strip()
+            if part.lower().startswith("boundary="):
+                boundary = part.split("=", 1)[1].strip().strip('"')
+                break
+        if not boundary:
+            raise HTTPException(status_code=400, detail="missing boundary")
+
+        # 简单 multipart 解析（提取 file 字段）
+        import cgi
+        from io import BytesIO
+        # FastAPI 没有直接暴露 multipart parser，用手动解析
+        boundary_bytes = boundary.encode("utf-8")
+        parts = body.split(b"--" + boundary_bytes)
+        file_data = None
+        file_filename = "upload.bin"
+        file_content_type = "application/octet-stream"
+
+        for part in parts:
+            if b"Content-Disposition" not in part:
+                continue
+            header_end = part.find(b"\r\n\r\n")
+            if header_end == -1:
+                continue
+            headers_text = part[:header_end].decode("utf-8", errors="ignore")
+            body_data = part[header_end + 4:]
+            # 去掉末尾的 \r\n
+            if body_data.endswith(b"\r\n"):
+                body_data = body_data[:-2]
+
+            if 'name="file"' in headers_text:
+                file_data = body_data
+                # 提取 filename
+                for h in headers_text.split("\r\n"):
+                    if "filename=" in h:
+                        fn_match = re.search(r'filename="?([^";\r\n]+)"?', h)
+                        if fn_match:
+                            file_filename = fn_match.group(1)
+                    if "Content-Type:" in h:
+                        file_content_type = h.split(":", 1)[1].strip()
+
+        if not file_data:
+            raise HTTPException(status_code=400, detail="file field is required")
+
+        # 上传到 DeepSeek
+        _base_headers = get_auth_headers(auth_ctx)
+        _token = auth_ctx.deepseek_token
+        _model_type = request.headers.get("X-Model-Type", "default")
+
+        file_id = await asyncio.to_thread(
+            _upload_file_to_deepseek_sync,
+            file_data, file_filename, file_content_type,
+            _token, _base_headers,
+            model_type=_model_type,
+        )
+
+        if not file_id:
+            raise HTTPException(status_code=500, detail="Failed to upload file.")
+
+        return JSONResponse(
+            content={
+                "id": file_id,
+                "object": "file",
+                "bytes": len(file_data),
+                "created_at": int(time.time()),
+                "filename": file_filename,
+                "purpose": "user_data",
+                "status": "uploaded",
+            },
+            status_code=200,
+        )
+
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    except Exception:
+        logger.exception("[upload_file] 未知异常")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+    finally:
+        await release_auth_context(auth_ctx)
 
 
 @app.get("/")
